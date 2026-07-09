@@ -1,11 +1,10 @@
 import argparse
 import random
 
-import gym
-import d4rl
-
 import numpy as np
 import torch
+
+from offlinerlkit.utils.d4rl_env import make_env, set_env_seed, qlearning_dataset
 
 
 from offlinerlkit.nets import MLP
@@ -57,8 +56,8 @@ def get_args():
 
 def train(args=get_args()):
     # create env and dataset
-    env = gym.make(args.task)
-    dataset = d4rl.qlearning_dataset(env)
+    env = make_env(args.task)
+    dataset = qlearning_dataset(env)
     # See https://github.com/aviralkumar2907/CQL/blob/master/d4rl/examples/cql_antmaze_new.py#L22
     if 'antmaze' in args.task:
         dataset["rewards"] = (dataset["rewards"] - 0.5) * 4.0
@@ -72,7 +71,7 @@ def train(args=get_args()):
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.deterministic = True
-    env.seed(args.seed)
+    set_env_seed(env, args.seed)
 
     # create policy model
     actor_backbone = MLP(input_dim=np.prod(args.obs_shape), hidden_dims=args.hidden_dims)

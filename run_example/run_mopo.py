@@ -3,11 +3,10 @@ import os
 import sys
 import random
 
-import gym
-import d4rl
-
 import numpy as np
 import torch
+
+from offlinerlkit.utils.d4rl_env import make_env, set_env_seed
 
 
 from offlinerlkit.nets import MLP
@@ -76,7 +75,7 @@ def get_args():
 
 def train(args=get_args()):
     # create env and dataset
-    env = gym.make(args.task)
+    env = make_env(args.task)
     """
     Here we use our own implementation of qlearning_dataset for mbrl algos.
     This is because for the d4rl.qlearning_dataset, it will take the obs[i+1] as the next obs,
@@ -87,7 +86,7 @@ def train(args=get_args()):
     if 'hopper' in args.task or 'halfcheetah' in args.task or 'walker2d' in args.task:
         dataset = qlearning_dataset(env)
     else:
-        dataset = d4rl.qlearning_dataset(env)
+        dataset = qlearning_dataset(env)
     args.obs_shape = env.observation_space.shape
     args.action_dim = np.prod(env.action_space.shape)
     args.max_action = env.action_space.high[0]
@@ -98,7 +97,7 @@ def train(args=get_args()):
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.deterministic = True
-    env.seed(args.seed)
+    set_env_seed(env, args.seed)
 
     # create policy model
     actor_backbone = MLP(input_dim=np.prod(args.obs_shape), hidden_dims=args.hidden_dims)

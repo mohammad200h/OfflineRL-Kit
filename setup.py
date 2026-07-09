@@ -12,7 +12,10 @@ setup(
         packages=find_packages(),
         platforms=["all"],
         install_requires=[
-            "gym>=0.15.4,<=0.24.1",
+            "gymnasium[mujoco]>=1.0.0",
+            "gymnasium-robotics>=1.3.0",
+            "mujoco>=3.0.0",
+            "h5py",
             "matplotlib",
             "numpy",
             "pandas",

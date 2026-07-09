@@ -49,21 +49,15 @@ OfflineRL-Kit is an offline reinforcement learning library based on pure PyTorch
 Detailed logs can be viewed in <https://drive.google.com/drive/folders/11QHHDlLmUEc097tPgYvb4gZ2IaqSpkHp?usp=share_link>.
 
 ## Installation
-First, install MuJuCo engine, which can be download from [here](https://mujoco.org/download), and install `mujoco-py` (its version depends on the version of MuJoCo engine you have installed).
+Install the latest [MuJoCo](https://mujoco.org/download) Python bindings (installed automatically with Gymnasium), then install OfflineRL-Kit:
 
-Second, install D4RL:
-```shell
-git clone https://github.com/Farama-Foundation/d4rl.git
-cd d4rl
-pip install -e .
-```
-
-Finally, install our OfflineRL-Kit!
 ```shell
 git clone https://github.com/yihaosun1124/OfflineRL-Kit.git
 cd OfflineRL-Kit
-python setup.py install
+pip install -e .
 ```
+
+Offline datasets are downloaded automatically from the original D4RL HDF5 files on first use. Evaluation uses Gymnasium MuJoCo v5 environments with the native `mujoco` package (no `mujoco-py` required). AntMaze tasks additionally require `gymnasium-robotics`, which is included in the package dependencies.
 
 ## Quick Start
 ### Train
@@ -72,7 +66,9 @@ This is an example of CQL. You can also run the full script at [run_example/run_
 First, make an environment and get the offline dataset:
 
 ```python
-env = gym.make(args.task)
+from offlinerlkit.utils.d4rl_env import make_env, qlearning_dataset
+
+env = make_env(args.task)
 dataset = qlearning_dataset(env)
 buffer = ReplayBuffer(
     buffer_size=len(dataset["observations"]),

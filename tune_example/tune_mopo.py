@@ -3,12 +3,12 @@ import os
 import sys
 import random
 
-import gym
-
 import numpy as np
 import torch
 import ray
 from ray import tune
+
+from offlinerlkit.utils.d4rl_env import make_env, set_env_seed
 
 
 from offlinerlkit.nets import MLP
@@ -61,7 +61,6 @@ def get_args():
 
 
 def run_exp(config):
-    import d4rl
     # set config
     global args
     args_for_exp = vars(args)
@@ -71,7 +70,7 @@ def run_exp(config):
     print(args_for_exp.task)
 
     # create env and dataset
-    env = gym.make(args_for_exp.task)
+    env = make_env(args_for_exp.task)
     dataset = qlearning_dataset(env)
     args_for_exp.obs_shape = env.observation_space.shape
     args_for_exp.action_dim = np.prod(env.action_space.shape)
@@ -82,7 +81,7 @@ def run_exp(config):
     np.random.seed(args_for_exp.seed)
     torch.manual_seed(args_for_exp.seed)
     torch.cuda.manual_seed_all(args_for_exp.seed)
-    env.seed(args_for_exp.seed)
+    set_env_seed(env, args_for_exp.seed)
 
     # create policy model
     actor_backbone = MLP(input_dim=np.prod(args_for_exp.obs_shape), hidden_dims=args_for_exp.hidden_dims)
