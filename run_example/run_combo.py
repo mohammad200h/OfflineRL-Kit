@@ -19,6 +19,7 @@ from offlinerlkit.buffer import ReplayBuffer
 from offlinerlkit.utils.logger import Logger, make_log_dirs
 from offlinerlkit.policy_trainer import MBPolicyTrainer
 from offlinerlkit.policy import COMBOPolicy
+from wandb_utils import add_wandb_args, init_wandb, finish_wandb
 
 
 """
@@ -80,6 +81,7 @@ def get_args():
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
 
+    add_wandb_args(parser)
     return parser.parse_args()
 
 
@@ -221,6 +223,13 @@ def train(args=get_args()):
     }
     logger = Logger(log_dirs, output_config)
     logger.log_hyperparameters(vars(args))
+    init_wandb(
+        args.track,
+        args.project,
+        args.wandb_name,
+        vars(args),
+        log_dirs=log_dirs,
+    )
 
     # create policy trainer
     policy_trainer = MBPolicyTrainer(
@@ -243,6 +252,7 @@ def train(args=get_args()):
         dynamics.train(real_buffer.sample_all(), logger, max_epochs_since_update=5)
     
     policy_trainer.train()
+    finish_wandb(args.track)
 
 
 if __name__ == "__main__":

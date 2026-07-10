@@ -305,8 +305,27 @@ class Logger(object):
                 if exclude is not None and handler.handler_name in exclude:
                     continue
                 handler.writekvs(self._name2val)
+        self._log_wandb_metrics()
         self._name2val.clear()
         self._name2cnt.clear()
+
+    def _log_wandb_metrics(self) -> None:
+        try:
+            import wandb
+        except ImportError:
+            return
+        if wandb.run is None:
+            return
+        metrics = {}
+        for key, value in self._name2val.items():
+            if key == DEFAULT_X_NAME:
+                continue
+            try:
+                metrics[key] = float(value)
+            except (TypeError, ValueError):
+                metrics[key] = value
+        if metrics:
+            wandb.log(metrics, step=self._timestep)
 
     def log(self, s: str, level=INFO) -> None:
         for handler in self._output_handlers:

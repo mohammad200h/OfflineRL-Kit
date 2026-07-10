@@ -154,6 +154,28 @@ policy_trainer = MFPolicyTrainer(
 policy_trainer.train()
 ```
 
+### Weights & Biases
+All scripts under `run_example/` support optional [Weights & Biases](https://wandb.ai) logging. Pass `--track` to log metrics to W&B (TensorBoard logs are synced automatically):
+
+```shell
+pip install wandb
+python run_example/run_cql.py --task hopper-medium-v2 --track
+```
+
+Optional flags:
+
+| Flag | Default | Description |
+| ---- | ------- | ----------- |
+| `--track` | off | Enable W&B logging |
+| `--project` | `offlin RL` | W&B project name |
+| `--wandb-name` | `<algo-name>_<task>` | W&B run name |
+
+Example with a custom run name:
+
+```shell
+python run_example/run_combo.py --task hopper-medium-v2 --track --wandb-name combo_hopper_v1
+```
+
 ### Tune
 You can easily tune your algorithm with the help of [Ray](https://github.com/ray-project/ray):
 ```python
