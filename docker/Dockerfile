@@ -27,6 +27,9 @@ RUN python3 -m pip install --upgrade pip setuptools wheel \
     && python3 -m pip install "gymnasium[mujoco]>=1.0.0" "gymnasium-robotics>=1.3.0" "mujoco>=3.0.0" h5py \
     && python3 -c "import mujoco; import gymnasium; print('mujoco', mujoco.__version__, 'gymnasium', gymnasium.__version__)"
 
+###### Data Collection #######
+RUN python3 -m pip install pynput pygame
+
 ###### WorkDir #######
 WORKDIR /workspace
 # COPY . /tmp/
