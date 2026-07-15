@@ -47,11 +47,11 @@ ANTMAZE_TASK_TO_ENV = {
 # Local demo datasets (basename under $D4RL_DATASET_DIR). Install with
 # data_colllection/install_mountain_car_dataset.py.
 CLASSIC_CONTROL_TASK_TO_ENV = {
-    "mountaincar-human-v0": "MountainCar-v0",
+    "mountaincar-human-v0": "MountainCarContinuous-v0",
 }
 
 CLASSIC_CONTROL_MAX_EPISODE_STEPS = {
-    "mountaincar-human-v0": 200,
+    "mountaincar-human-v0": 999,
 }
 
 REF_MIN_SCORE: Dict[str, float] = {
@@ -59,7 +59,7 @@ REF_MIN_SCORE: Dict[str, float] = {
     "hopper-random-v0": -20.272305,
     "walker2d-random-v0": 1.629008,
     "ant-random-v0": -325.6,
-    "mountaincar-human-v0": -200.0,
+    "mountaincar-human-v0": -99.89,
     "antmaze-umaze-v0": 0.0,
     "antmaze-umaze-diverse-v0": 0.0,
     "antmaze-medium-play-v0": 0.0,
@@ -79,7 +79,7 @@ REF_MAX_SCORE: Dict[str, float] = {
     "hopper-random-v0": 3234.3,
     "walker2d-random-v0": 4592.3,
     "ant-random-v0": 3879.7,
-    "mountaincar-human-v0": -110.0,
+    "mountaincar-human-v0": 99.89,
     "antmaze-umaze-v0": 1.0,
     "antmaze-umaze-diverse-v0": 1.0,
     "antmaze-medium-play-v0": 1.0,

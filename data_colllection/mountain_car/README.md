@@ -1,6 +1,6 @@
 # Mountain Car data collection
 
-Collect keyboard demonstrations for [MountainCar-v0](https://gymnasium.farama.org/environments/classic_control/mountain_car/) and save them as a D4RL-style HDF5 dataset for OfflineRL-Kit (e.g. `run_example/run_combo.py`).
+Collect keyboard demonstrations for [MountainCarContinuous-v0](https://gymnasium.farama.org/environments/classic_control/mountain_car_continuous/) and save them as a D4RL-style HDF5 dataset for OfflineRL-Kit (e.g. `run_example/run_combo.py`).
 
 ## Requirements
 
@@ -15,20 +15,25 @@ These are installed in the OfflineRL-Kit Docker image under the Data Collection 
 
 ```bash
 python play.py
+# recommended throttle feel (faster ramp / coast)
+python play.py --accel 2.0 --decel 3.0
 # optional
 python play.py --output ../demostrations/mountain_car_human.hdf5 --seed 0 --step-delay 0.05
+python play.py --accel 2.0 --decel 3.0 --max-speed 1.0
 ```
 
 Default output: `data_colllection/demostrations/mountain_car_human.hdf5`  
 If that file already exists, new episodes are **appended**.
 
+Throttle uses `SpeedController` (`controll.py`): force ramps gradually while ←/→ are held and coasts toward 0 when released. A live force bar is shown in the terminal.
+
 ### Controls
 
 | Key | Action |
 | --- | --- |
-| ← | Accelerate left (action 0) |
-| → | Accelerate right (action 2) |
-| (neither) | Coast / no accel (action 1) |
+| ← | Ramp force toward `-1.0` |
+| → | Ramp force toward `+1.0` |
+| (neither) | Coast force toward `0.0` |
 | `R` | Abort current episode and reset |
 | `S` | Save mid-session |
 | `Q` / `Esc` | Save and quit |
@@ -63,7 +68,7 @@ Default file: `../demostrations/mountain_car_human.hdf5`
 | Key | Shape | Notes |
 | --- | --- | --- |
 | `observations` | `(N, 2)` | position, velocity |
-| `actions` | `(N, 1)` | `{0, 1, 2}` as float32 |
+| `actions` | `(N, 1)` | continuous force in `[-1, 1]` as float32 |
 | `rewards` | `(N,)` | typically `-1` per step |
 | `terminals` | `(N,)` | goal reached |
 | `timeouts` | `(N,)` | episode truncated |

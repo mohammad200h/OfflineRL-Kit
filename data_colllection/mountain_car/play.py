@@ -1,10 +1,10 @@
-"""Collect MountainCar-v0 demonstrations with keyboard and save a D4RL-style HDF5.
+"""Collect MountainCarContinuous-v0 demos with keyboard and save a D4RL-style HDF5.
 
 Controls
 --------
-Left arrow  : accelerate left  (action 0)
-Right arrow : accelerate right (action 2)
-(no key)    : no acceleration  (action 1)
+Left arrow  : ramp force toward -1.0 (gradual)
+Right arrow : ramp force toward +1.0 (gradual)
+(no key)    : coast force toward 0.0
 R           : end the current episode early and start a new one
 S           : save dataset to disk (keep playing)
 Q / Esc     : save and quit
@@ -28,14 +28,15 @@ be passed into ``qlearning_dataset`` / ``ReplayBuffer.load_dataset`` used by
     dataset = qlearning_dataset(env, dataset=raw)
     real_buffer.load_dataset(dataset)
 
-Env reference: https://gymnasium.farama.org/environments/classic_control/mountain_car/
+Env reference:
+https://gymnasium.farama.org/environments/classic_control/mountain_car_continuous/
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-import threading
+import sys
 import time
 from typing import Dict, List, Tuple
 
@@ -43,72 +44,10 @@ import gymnasium as gym
 import h5py
 import numpy as np
 
-
-ACTION_LEFT = 0
-ACTION_NONE = 1
-ACTION_RIGHT = 2
+from controll import SpeedController, speed_bar
 
 
-class KeyController:
-    """Thread-safe keyboard state for left/right arrows and control keys."""
-
-    def __init__(self) -> None:
-        from pynput import keyboard
-
-        self._keyboard = keyboard
-        self._lock = threading.Lock()
-        self._left = False
-        self._right = False
-        self.reset_requested = False
-        self.save_requested = False
-        self.quit_requested = False
-        self._listener = keyboard.Listener(
-            on_press=self._on_press,
-            on_release=self._on_release,
-        )
-
-    def start(self) -> None:
-        self._listener.start()
-
-    def stop(self) -> None:
-        self._listener.stop()
-
-    def _on_press(self, key) -> None:
-        keyboard = self._keyboard
-        with self._lock:
-            if key == keyboard.Key.left:
-                self._left = True
-            elif key == keyboard.Key.right:
-                self._right = True
-            elif key == keyboard.Key.esc:
-                self.quit_requested = True
-            else:
-                try:
-                    char = key.char.lower() if key.char else ""
-                except AttributeError:
-                    char = ""
-                if char == "q":
-                    self.quit_requested = True
-                elif char == "r":
-                    self.reset_requested = True
-                elif char == "s":
-                    self.save_requested = True
-
-    def _on_release(self, key) -> None:
-        keyboard = self._keyboard
-        with self._lock:
-            if key == keyboard.Key.left:
-                self._left = False
-            elif key == keyboard.Key.right:
-                self._right = False
-
-    def get_action(self) -> int:
-        with self._lock:
-            if self._left and not self._right:
-                return ACTION_LEFT
-            if self._right and not self._left:
-                return ACTION_RIGHT
-            return ACTION_NONE
+ENV_ID = "MountainCarContinuous-v0"
 
 
 DATASET_KEYS = (
@@ -327,8 +266,12 @@ def save_d4rl_hdf5(
 
 
 def play(args: argparse.Namespace) -> None:
-    env = gym.make("MountainCar-v0", render_mode="human")
-    controller = KeyController()
+    env = gym.make(ENV_ID, render_mode="human")
+    controller = SpeedController(
+        max_speed=args.max_speed,
+        acceleration=args.accel,
+        deceleration=args.decel,
+    )
     controller.start()
 
     buffers = load_d4rl_hdf5(args.output)
@@ -337,22 +280,25 @@ def play(args: argparse.Namespace) -> None:
     episode_return = 0.0
     episode_len = 0
     total_steps = 0
+    dt = args.step_delay
 
     obs, _ = env.reset(seed=args.seed)
     episode += 1
     print(
-        "MountainCar keyboard collection\n"
-        "  ← / → : accelerate left / right\n"
-        "  (hold neither for coast)\n"
+        f"{ENV_ID} keyboard collection (gradual throttle)\n"
+        "  ← / → : ramp force toward -1 / +1\n"
+        "  (release to coast toward 0)\n"
         "  R : reset episode   S : save   Q/Esc : save & quit\n"
+        f"  accel={args.accel}/s  decel={args.decel}/s  max={args.max_speed}\n"
     )
 
     try:
         while not controller.quit_requested:
             if controller.reset_requested:
                 controller.reset_requested = False
+                controller.reset()
                 print(
-                    f"[ep {episode}] aborted  return={episode_return:.0f}  "
+                    f"\n[ep {episode}] aborted  return={episode_return:.1f}  "
                     f"len={episode_len}"
                 )
                 obs, _ = env.reset()
@@ -363,13 +309,15 @@ def play(args: argparse.Namespace) -> None:
 
             if controller.save_requested:
                 controller.save_requested = False
+                print()  # keep speed line from being overwritten by save msg
                 save_d4rl_hdf5(args.output, buffers, prev_count=prev_count)
 
+            speed = controller.update(dt)
             action = controller.get_action()
             next_obs, reward, terminated, truncated, _ = env.step(action)
 
             buffers["observations"].append(np.asarray(obs, dtype=np.float32))
-            buffers["actions"].append(np.float32(action))
+            buffers["actions"].append(np.float32(action[0]))
             buffers["rewards"].append(np.float32(reward))
             buffers["terminals"].append(bool(terminated))
             buffers["timeouts"].append(bool(truncated))
@@ -382,21 +330,31 @@ def play(args: argparse.Namespace) -> None:
             episode_len += 1
             total_steps += 1
 
+            bar = speed_bar(speed, args.max_speed)
+            sys.stdout.write(
+                f"\r  ep={episode}  step={episode_len}  "
+                f"ret={episode_return:+7.1f}  "
+                f"force={speed:+6.3f}  {bar}  "
+            )
+            sys.stdout.flush()
+
             if terminated or truncated:
                 status = "SUCCESS" if terminated else "timeout"
                 print(
-                    f"[ep {episode}] {status}  return={episode_return:.0f}  "
+                    f"\n[ep {episode}] {status}  return={episode_return:.1f}  "
                     f"len={episode_len}  total_steps={total_steps}"
                 )
+                controller.reset()
                 obs, _ = env.reset()
                 episode += 1
                 episode_return = 0.0
                 episode_len = 0
 
-            time.sleep(args.step_delay)
+            time.sleep(dt)
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
+        print()
         save_d4rl_hdf5(args.output, buffers, prev_count=prev_count)
         controller.stop()
         env.close()
@@ -404,7 +362,9 @@ def play(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Collect MountainCar-v0 demos with keyboard for OfflineRL-Kit."
+        description=(
+            "Collect MountainCarContinuous-v0 demos with keyboard for OfflineRL-Kit."
+        )
     )
     demo_dir = os.path.normpath(
         os.path.join(
@@ -424,7 +384,25 @@ def parse_args() -> argparse.Namespace:
         "--step-delay",
         type=float,
         default=0.05,
-        help="Seconds to sleep between env steps (controls play speed).",
+        help="Seconds to sleep between env steps (also throttle dt).",
+    )
+    parser.add_argument(
+        "--max-speed",
+        type=float,
+        default=1.0,
+        help="Max |force| from SpeedController (default: 1.0).",
+    )
+    parser.add_argument(
+        "--accel",
+        type=float,
+        default=1.5,
+        help="Throttle acceleration while holding ←/→, units per second.",
+    )
+    parser.add_argument(
+        "--decel",
+        type=float,
+        default=2.0,
+        help="Coast-down rate toward 0 when no key is held, units per second.",
     )
     parser.add_argument(
         "--view",
