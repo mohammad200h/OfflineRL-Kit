@@ -120,6 +120,12 @@ def terminaltion_fn_door(obs, act, next_obs):
     done = done[:, None]
     return done
 
+def termination_fn_mountaincar(obs, act, next_obs):
+    assert len(obs.shape) == len(next_obs.shape) == len(act.shape) == 2
+    # Goal flag on MountainCar-v0: position >= 0.5
+    done = next_obs[:, 0] >= 0.5
+    return done[:, None]
+
 def get_termination_fn(task):
     if 'halfcheetahvel' in task:
         return termination_fn_halfcheetahveljump
@@ -145,5 +151,7 @@ def get_termination_fn(task):
         return termination_fn_pen
     elif 'door' in task:
         return terminaltion_fn_door
+    elif 'mountaincar' in task or 'mountain_car' in task:
+        return termination_fn_mountaincar
     else:
         raise np.zeros

@@ -3,7 +3,8 @@ D4RL task helpers built on Gymnasium and the native MuJoCo Python bindings.
 
 Offline datasets are still loaded from the original D4RL HDF5 files, while
 evaluation uses modern Gymnasium MuJoCo environments (v5) or Gymnasium-Robotics
-for AntMaze tasks.
+for AntMaze tasks. Classic-control demos (MountainCar) use a local HDF5
+installed into ``$D4RL_DATASET_DIR``.
 """
 import os
 import urllib.request
@@ -13,6 +14,7 @@ import gymnasium as gym
 import h5py
 import numpy as np
 from gymnasium import Env
+from gymnasium.spaces import Box, Discrete
 from tqdm import tqdm
 
 try:
@@ -42,11 +44,22 @@ ANTMAZE_TASK_TO_ENV = {
     "antmaze-large-diverse-v2": "AntMaze_Large_Diverse_G-v4",
 }
 
+# Local demo datasets (basename under $D4RL_DATASET_DIR). Install with
+# data_colllection/install_mountain_car_dataset.py.
+CLASSIC_CONTROL_TASK_TO_ENV = {
+    "mountaincar-human-v0": "MountainCar-v0",
+}
+
+CLASSIC_CONTROL_MAX_EPISODE_STEPS = {
+    "mountaincar-human-v0": 200,
+}
+
 REF_MIN_SCORE: Dict[str, float] = {
     "halfcheetah-random-v0": -280.178953,
     "hopper-random-v0": -20.272305,
     "walker2d-random-v0": 1.629008,
     "ant-random-v0": -325.6,
+    "mountaincar-human-v0": -200.0,
     "antmaze-umaze-v0": 0.0,
     "antmaze-umaze-diverse-v0": 0.0,
     "antmaze-medium-play-v0": 0.0,
@@ -66,6 +79,7 @@ REF_MAX_SCORE: Dict[str, float] = {
     "hopper-random-v0": 3234.3,
     "walker2d-random-v0": 4592.3,
     "ant-random-v0": 3879.7,
+    "mountaincar-human-v0": -110.0,
     "antmaze-umaze-v0": 1.0,
     "antmaze-umaze-diverse-v0": 1.0,
     "antmaze-medium-play-v0": 1.0,
@@ -81,6 +95,8 @@ REF_MAX_SCORE: Dict[str, float] = {
 }
 
 DATASET_URLS: Dict[str, str] = {
+    # Basename must match the file placed by install_mountain_car_dataset.py
+    "mountaincar-human-v0": "local://mountain_car_human.hdf5",
     "antmaze-umaze-v2": "http://rail.eecs.berkeley.edu/datasets/offline_rl/ant_maze_v2/Ant_maze_u-maze_noisy_multistart_False_multigoal_False_sparse_fixed.hdf5",
     "antmaze-umaze-diverse-v2": "http://rail.eecs.berkeley.edu/datasets/offline_rl/ant_maze_v2/Ant_maze_u-maze_noisy_multistart_True_multigoal_True_sparse_fixed.hdf5",
     "antmaze-medium-play-v2": "http://rail.eecs.berkeley.edu/datasets/offline_rl/ant_maze_v2/Ant_maze_big-maze_noisy_multistart_True_multigoal_False_sparse_fixed.hdf5",
@@ -114,6 +130,27 @@ def _register_robotics_envs() -> None:
         gym.register_envs(gymnasium_robotics)
 
 
+class DiscreteAsBoxWrapper(gym.ActionWrapper):
+    """Expose Discrete actions as Box(1,) floats for OfflineRL-Kit policies."""
+
+    def __init__(self, env: Env) -> None:
+        super().__init__(env)
+        if not isinstance(env.action_space, Discrete):
+            raise TypeError(
+                f"DiscreteAsBoxWrapper expects Discrete action space, got {env.action_space}"
+            )
+        self._n = int(env.action_space.n)
+        self.action_space = Box(
+            low=np.zeros((1,), dtype=np.float32),
+            high=np.full((1,), self._n - 1, dtype=np.float32),
+            dtype=np.float32,
+        )
+
+    def action(self, act: np.ndarray) -> int:
+        value = float(np.asarray(act, dtype=np.float32).reshape(-1)[0])
+        return int(np.clip(np.rint(value), 0, self._n - 1))
+
+
 def _get_h5_keys(h5file: h5py.File) -> list:
     keys = []
 
@@ -134,6 +171,12 @@ def download_dataset(dataset_url: str) -> str:
     os.makedirs(DATASET_PATH, exist_ok=True)
     dataset_filepath = _dataset_filepath(dataset_url)
     if not os.path.exists(dataset_filepath):
+        if dataset_url.startswith("local://"):
+            raise IOError(
+                f"Local dataset missing: {dataset_filepath}. "
+                "Install it with: "
+                "python3 data_colllection/install_mountain_car_dataset.py"
+            )
         print("Downloading dataset:", dataset_url, "to", dataset_filepath)
         urllib.request.urlretrieve(dataset_url, dataset_filepath)
     if not os.path.exists(dataset_filepath):
@@ -142,6 +185,9 @@ def download_dataset(dataset_url: str) -> str:
 
 
 def _resolve_gymnasium_env_id(task: str) -> str:
+    if task in CLASSIC_CONTROL_TASK_TO_ENV:
+        return CLASSIC_CONTROL_TASK_TO_ENV[task]
+
     if task in ANTMAZE_TASK_TO_ENV:
         if not _HAS_ROBOTICS:
             raise ImportError(
@@ -156,7 +202,8 @@ def _resolve_gymnasium_env_id(task: str) -> str:
 
     raise ValueError(
         f"Unsupported D4RL task '{task}'. Supported families: "
-        f"{list(MUJOCO_AGENT_TO_ENV)} and {list(ANTMAZE_TASK_TO_ENV)}."
+        f"{list(MUJOCO_AGENT_TO_ENV)}, {list(ANTMAZE_TASK_TO_ENV)}, "
+        f"and {list(CLASSIC_CONTROL_TASK_TO_ENV)}."
     )
 
 
@@ -246,7 +293,12 @@ def make_env(task: str, max_episode_steps: int = 1000) -> D4RLEnv:
 
     _register_robotics_envs()
     env_id = _resolve_gymnasium_env_id(task)
-    env = gym.make(env_id, max_episode_steps=max_episode_steps)
+    steps = CLASSIC_CONTROL_MAX_EPISODE_STEPS.get(task, max_episode_steps)
+    env = gym.make(env_id, max_episode_steps=steps)
+    if task in CLASSIC_CONTROL_TASK_TO_ENV:
+        # Demos store discrete actions as shape (N, 1) floats; OfflineRL-Kit
+        # also expects action_space.high for continuous policy heads.
+        env = DiscreteAsBoxWrapper(env)
 
     return D4RLEnv(
         task=task,
@@ -254,7 +306,7 @@ def make_env(task: str, max_episode_steps: int = 1000) -> D4RLEnv:
         dataset_url=DATASET_URLS[task],
         ref_min_score=REF_MIN_SCORE[task],
         ref_max_score=REF_MAX_SCORE[task],
-        max_episode_steps=max_episode_steps,
+        max_episode_steps=steps,
     )
 
 
