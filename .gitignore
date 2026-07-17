@@ -10,3 +10,7 @@
 **/_log
 docker/.env
 data_colllection/demostrations/
+
+# Trained model artifacts (keep directory, ignore contents)
+models/**
+!models/.gitkeep

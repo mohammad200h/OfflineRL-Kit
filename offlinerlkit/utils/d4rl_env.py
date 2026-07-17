@@ -287,17 +287,26 @@ class D4RLEnv:
         return data_dict
 
 
-def make_env(task: str, max_episode_steps: int = 1000) -> D4RLEnv:
+def make_env(
+    task: str,
+    max_episode_steps: int = 1000,
+    render_mode: Optional[str] = None,
+) -> D4RLEnv:
     if task not in DATASET_URLS:
         raise ValueError(f"Unknown D4RL task '{task}'.")
 
     _register_robotics_envs()
     env_id = _resolve_gymnasium_env_id(task)
     steps = CLASSIC_CONTROL_MAX_EPISODE_STEPS.get(task, max_episode_steps)
-    env = gym.make(env_id, max_episode_steps=steps)
-    if task in CLASSIC_CONTROL_TASK_TO_ENV:
-        # Demos store discrete actions as shape (N, 1) floats; OfflineRL-Kit
-        # also expects action_space.high for continuous policy heads.
+    make_kwargs: Dict[str, Any] = {"max_episode_steps": steps}
+    if render_mode is not None:
+        make_kwargs["render_mode"] = render_mode
+    env = gym.make(env_id, **make_kwargs)
+    # MountainCarContinuous-v0 already exposes Box(-1, 1, (1,)). Only wrap
+    # classic-control tasks that still use Discrete actions.
+    if task in CLASSIC_CONTROL_TASK_TO_ENV and isinstance(
+        env.action_space, Discrete
+    ):
         env = DiscreteAsBoxWrapper(env)
 
     return D4RLEnv(

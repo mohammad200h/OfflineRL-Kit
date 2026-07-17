@@ -6,7 +6,9 @@ import random
 import numpy as np
 import torch
 
-from offlinerlkit.utils.d4rl_env import make_env, set_env_seed
+import h5py
+
+from offlinerlkit.utils.d4rl_env import make_env, set_env_seed, download_dataset
 
 from offlinerlkit.nets import MLP
 from offlinerlkit.modules import ActorProb, Critic, TanhDiagGaussian, EnsembleDynamicsModel
@@ -19,6 +21,7 @@ from offlinerlkit.utils.logger import Logger, make_log_dirs
 from offlinerlkit.policy_trainer import MBPolicyTrainer
 from offlinerlkit.policy import COMBOPolicy
 from wandb_utils import add_wandb_args, init_wandb, finish_wandb
+from eval_dynamics import make_eval_callback
 
 
 """
@@ -67,18 +70,96 @@ def get_args():
     parser.add_argument("--dynamics-weight-decay", type=float, nargs='*', default=[2.5e-5, 5e-5, 7.5e-5, 7.5e-5, 1e-4])
     parser.add_argument("--n-ensemble", type=int, default=7)
     parser.add_argument("--n-elites", type=int, default=5)
+    parser.add_argument(
+        "--dynamics-batch-size",
+        type=int,
+        default=256,
+        help="Mini-batch size for ensemble dynamics training",
+    )
+    parser.add_argument(
+        "--holdout-ratio",
+        type=float,
+        default=0.2,
+        help="Fraction of transitions held out for dynamics validation / elite selection "
+             "(capped at 1000 samples inside EnsembleDynamics.train)",
+    )
+    parser.add_argument(
+        "--logvar-loss-coef",
+        type=float,
+        default=0.01,
+        help="Coefficient on the Gaussian log-variance regularizer in dynamics training",
+    )
     parser.add_argument("--rollout-freq", type=int, default=1000)
     parser.add_argument("--rollout-batch-size", type=int, default=50000)
     parser.add_argument("--rollout-length", type=int, default=5)
     parser.add_argument("--model-retain-epochs", type=int, default=5)
     parser.add_argument("--real-ratio", type=float, default=0.5)
     parser.add_argument("--load-dynamics-path", type=str, default=None)
+    parser.add_argument(
+        "--dynamics-max-epochs",
+        type=int,
+        default=None,
+        help="Hard cap on dynamics training epochs (None = early-stop only)",
+    )
+    parser.add_argument(
+        "--max-epochs-since-update",
+        type=int,
+        default=5,
+        help="Early-stop patience; set very large to effectively disable early stopping",
+    )
+    parser.add_argument(
+        "--output-model-name",
+        type=str,
+        default=None,
+        help="Save under models/dynamics-ensemble/<seed>/<output-model-name>/ "
+             "(default: <task>). Also used as wandb run name if --wandb-name is unset.",
+    )
 
     parser.add_argument("--epoch", type=int, default=1000)
     parser.add_argument("--step-per-epoch", type=int, default=1000)
     parser.add_argument("--eval_episodes", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+
+    parser.add_argument(
+        "--eval-demo-path",
+        type=str,
+        default=None,
+        help="HDF5 demos for dynamics delta/reward eval. "
+             "Default: the offline dataset for --task (D4RL / local demo path).",
+    )
+    parser.add_argument(
+        "--eval-num-trajs",
+        type=int,
+        default=10,
+        help="Number of demo trajectories for dynamics delta/reward eval (default: 10).",
+    )
+    parser.add_argument(
+        "--eval-freq",
+        type=int,
+        default=1,
+        help="Run delta eval every N dynamics epochs (also once after elite selection). "
+             "Set 0 to disable mid-training eval (final eval still runs if demo path exists).",
+    )
+    parser.add_argument(
+        "--eval-record-dir",
+        type=str,
+        default=None,
+        help="If set, save true/pred delta and reward .npz files here each eval. "
+             "Default when None: <save_dir>/delta_eval",
+    )
+    parser.add_argument(
+        "--eval-fixed-trajs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse the same demo trajectories every eval (default: on). "
+             "Disable with --no-eval-fixed-trajs for random resampling.",
+    )
+    parser.add_argument(
+        "--no-eval-dynamics",
+        action="store_true",
+        help="Disable trajectory delta/reward evaluation during dynamics training.",
+    )
 
     add_wandb_args(parser)
     return parser.parse_args()
@@ -92,6 +173,34 @@ def load_neorl_dataset(env, data_type, traj_num=1000):
     dataset["rewards"] = train_data["reward"]
     dataset["terminals"] = train_data["done"]
     return dataset
+
+
+def resolve_eval_demo_path(args, env, *, is_neorl: bool) -> str | None:
+    """Pick the HDF5 used for mid-training delta eval.
+
+    Prefer an explicit --eval-demo-path. Otherwise use the same offline dataset
+    as training (so Walker2D / Hopper / etc. do not fall back to MountainCar demos).
+    """
+    if args.eval_demo_path:
+        return args.eval_demo_path
+    if is_neorl:
+        return None
+    dataset_url = getattr(env, "_dataset_url", None)
+    if not dataset_url:
+        return None
+    return download_dataset(dataset_url)
+
+
+def demo_matches_env(demo_path: str, obs_dim: int, action_dim: int) -> bool:
+    """Return True if demo HDF5 obs/action widths match the training env."""
+    with h5py.File(demo_path, "r") as f:
+        if "observations" not in f or "actions" not in f:
+            return False
+        demo_obs = int(np.prod(f["observations"].shape[1:])) if f["observations"].ndim > 1 else 1
+        act = f["actions"]
+        demo_act = 1 if act.ndim == 1 else int(np.prod(act.shape[1:]))
+        return demo_obs == obs_dim and demo_act == action_dim
+
 
 def train(args=get_args()):
     is_neorl = args.task.split('-')[1] == 'v3'
@@ -218,6 +327,9 @@ def train(args=get_args()):
     )
     real_buffer.load_dataset(dataset)
 
+    model_name = args.output_model_name or args.task
+    wandb_name = args.wandb_name or args.output_model_name
+
     # log
     log_dirs = make_log_dirs(args.task, args.algo_name, args.seed, vars(args))
     # key: output file name, value: output handler type
@@ -232,14 +344,59 @@ def train(args=get_args()):
     init_wandb(
         args.track,
         args.project,
-        args.wandb_name,
+        wandb_name,
         vars(args),
         log_dirs=log_dirs,
     )
 
-    dynamics.train(real_buffer.sample_all(), logger, max_epochs_since_update=5)
-    os.makedirs(os.path.join('./models/dynamics-ensemble/', str(args.seed), args.task), exist_ok = True)
-    dynamics.save(os.path.join('./models/dynamics-ensemble/', str(args.seed), args.task))
+    save_dir = os.path.join('./models/dynamics-ensemble/', str(args.seed), model_name)
+    os.makedirs(save_dir, exist_ok=True)
+
+    eval_callback = None
+    eval_freq = args.eval_freq
+    if not args.no_eval_dynamics:
+        eval_demo_path = resolve_eval_demo_path(args, env, is_neorl=is_neorl)
+        obs_dim = int(np.prod(args.obs_shape))
+        if eval_demo_path is None or not os.path.isfile(eval_demo_path):
+            logger.log(
+                f"Warning: eval demo not found"
+                f"{'' if eval_demo_path is None else f' at {eval_demo_path}'}; "
+                "skipping dynamics delta eval."
+            )
+        elif not demo_matches_env(eval_demo_path, obs_dim, int(args.action_dim)):
+            logger.log(
+                f"Warning: eval demo at {eval_demo_path} does not match "
+                f"env dims obs={obs_dim} act={args.action_dim}; "
+                "skipping dynamics delta eval. Pass --eval-demo-path for this task."
+            )
+        else:
+            logger.log(f"Dynamics delta eval demos: {eval_demo_path}")
+            record_dir = args.eval_record_dir
+            if record_dir is None:
+                record_dir = os.path.join(save_dir, "delta_eval")
+            eval_callback = make_eval_callback(
+                eval_demo_path,
+                num_trajs=args.eval_num_trajs,
+                seed=args.seed,
+                record_dir=record_dir,
+                fixed_trajs=args.eval_fixed_trajs,
+            )
+            # eval_freq=0: skip mid-training; train() still runs a final eval.
+            if eval_freq == 0:
+                eval_freq = 10**9
+
+    dynamics.train(
+        real_buffer.sample_all(),
+        logger,
+        max_epochs=args.dynamics_max_epochs,
+        max_epochs_since_update=args.max_epochs_since_update,
+        batch_size=args.dynamics_batch_size,
+        holdout_ratio=args.holdout_ratio,
+        logvar_loss_coef=args.logvar_loss_coef,
+        eval_callback=eval_callback,
+        eval_freq=eval_freq,
+    )
+    dynamics.save(save_dir)
     finish_wandb(args.track)
 
 

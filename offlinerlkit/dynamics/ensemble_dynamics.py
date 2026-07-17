@@ -111,7 +111,9 @@ class EnsembleDynamics(BaseDynamics):
         max_epochs_since_update: int = 5,
         batch_size: int = 256,
         holdout_ratio: float = 0.2,
-        logvar_loss_coef: float = 0.01
+        logvar_loss_coef: float = 0.01,
+        eval_callback: Optional[Callable[["EnsembleDynamics", int], Optional[Dict]]] = None,
+        eval_freq: int = 1,
     ) -> None:
         inputs, targets = self.format_samples_for_training(data)
         data_size = inputs.shape[0]
@@ -141,6 +143,17 @@ class EnsembleDynamics(BaseDynamics):
             holdout_loss = (np.sort(new_holdout_losses)[:self.model.num_elites]).mean()
             logger.logkv("loss/dynamics_train_loss", train_loss)
             logger.logkv("loss/dynamics_holdout_loss", holdout_loss)
+
+            if (
+                eval_callback is not None
+                and eval_freq > 0
+                and (epoch % eval_freq) == 0
+            ):
+                eval_metrics = eval_callback(self, epoch)
+                if eval_metrics:
+                    for key, value in eval_metrics.items():
+                        logger.logkv(key, value)
+
             logger.set_timestep(epoch)
             logger.dumpkvs(exclude=["policy_training_progress"])
 
@@ -169,6 +182,15 @@ class EnsembleDynamics(BaseDynamics):
         self.save(logger.model_dir)
         self.model.eval()
         logger.log("elites:{} , holdout loss: {}".format(indexes, (np.sort(holdout_losses)[:self.model.num_elites]).mean()))
+
+        # Final eval after elite selection (deltas can change vs mid-training).
+        if eval_callback is not None:
+            eval_metrics = eval_callback(self, epoch)
+            if eval_metrics:
+                for key, value in eval_metrics.items():
+                    logger.logkv(key, value)
+                logger.set_timestep(epoch)
+                logger.dumpkvs(exclude=["policy_training_progress"])
     
     def learn(
         self,
