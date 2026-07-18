@@ -14,6 +14,11 @@ from offlinerlkit.nets import MLP
 from offlinerlkit.modules import ActorProb, Critic, TanhDiagGaussian, EnsembleDynamicsModel
 from offlinerlkit.dynamics import EnsembleDynamics
 from offlinerlkit.utils.scaler import StandardScaler
+from offlinerlkit.utils.reward_encoding import (
+    RewardEncodingConfig,
+    SymlogTwoHotEncoder,
+    fit_reward_preprocessor,
+)
 from offlinerlkit.utils.termination_fns import get_termination_fn
 from offlinerlkit.utils.load_dataset import qlearning_dataset
 from offlinerlkit.buffer import ReplayBuffer
@@ -88,6 +93,31 @@ def get_args():
         type=float,
         default=0.01,
         help="Coefficient on the Gaussian log-variance regularizer in dynamics training",
+    )
+    parser.add_argument(
+        "--reward-mode",
+        type=str,
+        default="twohot",
+        choices=["twohot", "gaussian_joint"],
+        help="Reward head: symlog twohot categorical (default) or legacy joint Gaussian",
+    )
+    parser.add_argument(
+        "--num-reward-bins",
+        type=int,
+        default=255,
+        help="Number of symlog bins for twohot reward prediction",
+    )
+    parser.add_argument(
+        "--reward-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight on reward CE loss (twohot mode)",
+    )
+    parser.add_argument(
+        "--dynamics-loss-weight",
+        type=float,
+        default=1.0,
+        help="Weight on state-delta Gaussian loss (twohot mode)",
     )
     parser.add_argument("--rollout-freq", type=int, default=1000)
     parser.add_argument("--rollout-batch-size", type=int, default=50000)
@@ -273,6 +303,8 @@ def train(args=get_args()):
         num_ensemble=args.n_ensemble,
         num_elites=args.n_elites,
         weight_decays=args.dynamics_weight_decay,
+        reward_mode=args.reward_mode,
+        num_reward_bins=args.num_reward_bins,
         device=args.device
     )
     dynamics_optim = torch.optim.Adam(
@@ -281,11 +313,19 @@ def train(args=get_args()):
     )
     scaler = StandardScaler()
     termination_fn = get_termination_fn(task=args.task)
+    reward_config = RewardEncodingConfig(
+        reward_mode=args.reward_mode,
+        reward_loss_weight=args.reward_loss_weight,
+        dynamics_loss_weight=args.dynamics_loss_weight,
+        preprocessor=fit_reward_preprocessor(dataset["rewards"], args.task),
+        encoder=SymlogTwoHotEncoder(num_bins=args.num_reward_bins),
+    )
     dynamics = EnsembleDynamics(
         dynamics_model,
         dynamics_optim,
         scaler,
-        termination_fn
+        termination_fn,
+        reward_config=reward_config,
     )
 
     if args.load_dynamics_path:
@@ -385,8 +425,10 @@ def train(args=get_args()):
             if eval_freq == 0:
                 eval_freq = 10**9
 
+    train_data = real_buffer.sample_all()
+    train_data["task"] = args.task
     dynamics.train(
-        real_buffer.sample_all(),
+        train_data,
         logger,
         max_epochs=args.dynamics_max_epochs,
         max_epochs_since_update=args.max_epochs_since_update,

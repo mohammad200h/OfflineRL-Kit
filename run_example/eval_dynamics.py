@@ -101,12 +101,11 @@ def predict_mean_outputs(
     action: np.ndarray,
     *,
     use_elites: bool = True,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """Predict mean state delta and reward from the ensemble.
 
-    Returns ``(delta, reward)`` with shapes ``(batch, obs_dim)`` and ``(batch,)``.
-    Uses the mean of elite members when ``use_elites`` is True; otherwise the
-    mean over the full ensemble. Deterministic (no sampling from logvar).
+    Returns ``(delta, reward, reward_logits)``.
+    ``reward_logits`` is set when the model uses symlog twohot reward heads.
     """
     obs = np.asarray(obs, dtype=np.float32)
     action = np.asarray(action, dtype=np.float32)
@@ -125,15 +124,26 @@ def predict_mean_outputs(
             f"(not a different env's demos) via --eval-demo-path."
         )
     obs_act = dynamics.scaler.transform(obs_act)
+
+    if dynamics._twohot:
+        delta_mean, _, reward_logits = dynamics.model(obs_act)
+        if use_elites:
+            elite_idxs = dynamics.model.elites.data.cpu().numpy()
+            delta_mean = delta_mean[elite_idxs]
+            reward_logits = reward_logits[elite_idxs]
+        pred_delta = delta_mean.mean(dim=0).cpu().numpy().astype(np.float32)
+        logits = reward_logits.mean(dim=0).cpu().numpy().astype(np.float32)
+        reward = dynamics.reward_config.decode_logits_to_normalized(logits).reshape(-1)
+        return pred_delta, reward, logits
+
     mean, _ = dynamics.model(obs_act)
-    # mean: (ensemble, batch, obs_dim + reward)
     if use_elites:
         elite_idxs = dynamics.model.elites.data.cpu().numpy()
         mean = mean[elite_idxs]
     pred = mean.mean(dim=0).cpu().numpy().astype(np.float32)
     delta = pred[..., :-1]
     reward = pred[..., -1]
-    return delta, reward
+    return delta, reward, None
 
 
 @torch.no_grad()
@@ -145,7 +155,7 @@ def predict_delta(
     use_elites: bool = True,
 ) -> np.ndarray:
     """Predict mean state delta (batch, obs_dim) from the ensemble."""
-    delta, _ = predict_mean_outputs(
+    delta, _, _ = predict_mean_outputs(
         dynamics, obs, action, use_elites=use_elites
     )
     return delta
@@ -160,7 +170,7 @@ def evaluate_delta_on_transitions(
 ) -> Dict[str, Any]:
     """Compare true vs predicted deltas (and rewards, if given) on transitions."""
     true_delta = (next_observations - observations).astype(np.float32)
-    pred_delta, pred_reward = predict_mean_outputs(
+    pred_delta, pred_reward, pred_reward_logits = predict_mean_outputs(
         dynamics, observations, actions
     )
 
@@ -196,6 +206,30 @@ def evaluate_delta_on_transitions(
         out["reward_mae"] = float(np.mean(np.abs(reward_err)))
         out["reward_true_mean"] = float(np.mean(true_reward))
         out["reward_pred_mean"] = float(np.mean(pred_reward))
+
+        if dynamics._twohot and pred_reward_logits is not None:
+            encoder = dynamics.reward_config.encoder
+            preprocessor = dynamics.reward_config.preprocessor
+            true_reward_norm = preprocessor.transform(true_reward)
+            out["true_reward_norm"] = true_reward_norm
+            out["reward_mse"] = float(
+                np.mean((pred_reward - true_reward_norm) ** 2)
+            )
+            out["reward_mae"] = float(
+                np.mean(np.abs(pred_reward - true_reward_norm))
+            )
+            out["reward_true_mean"] = float(np.mean(true_reward_norm))
+            out["reward_pred_mean"] = float(np.mean(pred_reward))
+            rewards_norm = true_reward_norm
+            true_bins = encoder.primary_bin_index(rewards_norm)
+            pred_bins = encoder.decode_bin_indices(pred_reward_logits)
+            twohot = encoder.encode_twohot(rewards_norm)
+            out["true_reward_bins"] = true_bins
+            out["pred_reward_bins"] = pred_bins
+            out["reward_bin_acc"] = float(np.mean(true_bins == pred_bins))
+            out["reward_bin_ce"] = encoder.cross_entropy(
+                pred_reward_logits, twohot
+            )
 
     return out
 
@@ -252,9 +286,11 @@ def evaluate_dynamics_on_demos(
             true_delta=result["true_delta"],
             pred_delta=result["pred_delta"],
             error=result["error"],
-            true_reward=result["true_reward"],
-            pred_reward=result["pred_reward"],
-            reward_error=result["reward_error"],
+            true_reward=result.get("true_reward"),
+            pred_reward=result.get("pred_reward"),
+            reward_error=result.get("reward_error"),
+            true_reward_bins=result.get("true_reward_bins"),
+            pred_reward_bins=result.get("pred_reward_bins"),
             observations=observations,
             actions=actions,
             next_observations=next_observations,
@@ -265,11 +301,15 @@ def evaluate_dynamics_on_demos(
     metrics: Dict[str, float] = {
         "eval/delta_mse": result["mse"],
         "eval/delta_mae": result["mae"],
-        "eval/reward_mse": result["reward_mse"],
-        "eval/reward_mae": result["reward_mae"],
-        "eval/reward_true_mean": result["reward_true_mean"],
-        "eval/reward_pred_mean": result["reward_pred_mean"],
+        "eval/reward_true_mean": result.get("reward_true_mean", float("nan")),
+        "eval/reward_pred_mean": result.get("reward_pred_mean", float("nan")),
     }
+    if "reward_bin_acc" in result:
+        metrics["eval/reward_bin_acc"] = result["reward_bin_acc"]
+        metrics["eval/reward_bin_ce"] = result["reward_bin_ce"]
+    else:
+        metrics["eval/reward_mse"] = result.get("reward_mse", float("nan"))
+        metrics["eval/reward_mae"] = result.get("reward_mae", float("nan"))
     for i, (mse_i, mae_i) in enumerate(
         zip(result["mse_per_dim"], result["mae_per_dim"])
     ):
@@ -325,7 +365,17 @@ def _build_dynamics_from_checkpoint(
     weight_decay: List[float],
     task: str,
     device: str,
+    reward_mode: str = "twohot",
+    num_reward_bins: int = 255,
 ) -> EnsembleDynamics:
+    from offlinerlkit.utils.reward_encoding import RewardEncodingConfig
+
+    reward_config = RewardEncodingConfig.load(load_path)
+    if reward_config.reward_mode == "gaussian_joint":
+        reward_mode = "gaussian_joint"
+    else:
+        reward_mode = "twohot"
+        num_reward_bins = reward_config.encoder.num_bins
     model = EnsembleDynamicsModel(
         obs_dim=obs_dim,
         action_dim=action_dim,
@@ -333,12 +383,14 @@ def _build_dynamics_from_checkpoint(
         num_ensemble=n_ensemble,
         num_elites=n_elites,
         weight_decays=weight_decay,
+        reward_mode=reward_mode,
+        num_reward_bins=num_reward_bins,
         device=device,
     )
     optim = torch.optim.Adam(model.parameters(), lr=1e-3)
     scaler = StandardScaler()
     dynamics = EnsembleDynamics(
-        model, optim, scaler, get_termination_fn(task=task)
+        model, optim, scaler, get_termination_fn(task=task), reward_config=reward_config
     )
     dynamics.load(load_path)
     return dynamics

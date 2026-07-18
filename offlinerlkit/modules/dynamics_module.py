@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from typing import Dict, List, Union, Tuple, Optional
+from typing import Dict, List, Union, Tuple, Optional, Literal
 from offlinerlkit.nets import EnsembleLinear
 
 
@@ -28,6 +28,9 @@ def soft_clamp(
     return x
 
 
+RewardMode = Literal["twohot", "gaussian_joint"]
+
+
 class EnsembleDynamicsModel(nn.Module):
     def __init__(
         self,
@@ -39,6 +42,8 @@ class EnsembleDynamicsModel(nn.Module):
         activation: nn.Module = Swish,
         weight_decays: Optional[Union[List[float], Tuple[float]]] = None,
         with_reward: bool = True,
+        reward_mode: RewardMode = "twohot",
+        num_reward_bins: int = 255,
         device: str = "cpu"
     ) -> None:
         super().__init__()
@@ -46,6 +51,10 @@ class EnsembleDynamicsModel(nn.Module):
         self.num_ensemble = num_ensemble
         self.num_elites = num_elites
         self._with_reward = with_reward
+        self.obs_dim = obs_dim
+        self.action_dim = action_dim
+        self.reward_mode = reward_mode
+        self.num_reward_bins = num_reward_bins
         self.device = torch.device(device)
 
         self.activation = activation()
@@ -60,20 +69,39 @@ class EnsembleDynamicsModel(nn.Module):
             module_list.append(EnsembleLinear(in_dim, out_dim, num_ensemble, weight_decay))
         self.backbones = nn.ModuleList(module_list)
 
-        self.output_layer = EnsembleLinear(
-            hidden_dims[-1],
-            2 * (obs_dim + self._with_reward),
-            num_ensemble,
-            weight_decays[-1]
-        )
+        if reward_mode == "twohot":
+            dynamics_out_dim = 2 * obs_dim
+            self.output_layer = EnsembleLinear(
+                hidden_dims[-1],
+                dynamics_out_dim,
+                num_ensemble,
+                weight_decays[-1],
+            )
+            self.reward_head = EnsembleLinear(
+                hidden_dims[-1],
+                num_reward_bins,
+                num_ensemble,
+                weight_decays[-1],
+            )
+            logvar_dim = obs_dim
+        else:
+            dynamics_out_dim = 2 * (obs_dim + int(with_reward))
+            self.output_layer = EnsembleLinear(
+                hidden_dims[-1],
+                dynamics_out_dim,
+                num_ensemble,
+                weight_decays[-1],
+            )
+            self.reward_head = None
+            logvar_dim = obs_dim + int(with_reward)
 
         self.register_parameter(
             "max_logvar",
-            nn.Parameter(torch.ones(obs_dim + self._with_reward) * 0.5, requires_grad=True)
+            nn.Parameter(torch.ones(logvar_dim) * 0.5, requires_grad=True)
         )
         self.register_parameter(
             "min_logvar",
-            nn.Parameter(torch.ones(obs_dim + self._with_reward) * -10, requires_grad=True)
+            nn.Parameter(torch.ones(logvar_dim) * -10, requires_grad=True)
         )
 
         self.register_parameter(
@@ -83,12 +111,26 @@ class EnsembleDynamicsModel(nn.Module):
 
         self.to(self.device)
 
-    def forward(self, obs_action: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
-        obs_action = torch.as_tensor(obs_action, dtype=torch.float32).to(self.device)
+    def _shared_features(self, obs_action: torch.Tensor) -> torch.Tensor:
         output = obs_action
         for layer in self.backbones:
             output = self.activation(layer(output))
-        mean, logvar = torch.chunk(self.output_layer(output), 2, dim=-1)
+        return output
+
+    def forward(
+        self, obs_action: Union[np.ndarray, torch.Tensor]
+    ) -> Union[
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        Tuple[torch.Tensor, torch.Tensor],
+    ]:
+        obs_action = torch.as_tensor(obs_action, dtype=torch.float32).to(self.device)
+        features = self._shared_features(obs_action)
+        if self.reward_mode == "twohot":
+            mean, logvar = torch.chunk(self.output_layer(features), 2, dim=-1)
+            logvar = soft_clamp(logvar, self.min_logvar, self.max_logvar)
+            reward_logits = self.reward_head(features)
+            return mean, logvar, reward_logits
+        mean, logvar = torch.chunk(self.output_layer(features), 2, dim=-1)
         logvar = soft_clamp(logvar, self.min_logvar, self.max_logvar)
         return mean, logvar
 
@@ -96,17 +138,23 @@ class EnsembleDynamicsModel(nn.Module):
         for layer in self.backbones:
             layer.load_save()
         self.output_layer.load_save()
+        if self.reward_head is not None:
+            self.reward_head.load_save()
 
     def update_save(self, indexes: List[int]) -> None:
         for layer in self.backbones:
             layer.update_save(indexes)
         self.output_layer.update_save(indexes)
+        if self.reward_head is not None:
+            self.reward_head.update_save(indexes)
     
     def get_decay_loss(self) -> torch.Tensor:
         decay_loss = 0
         for layer in self.backbones:
             decay_loss += layer.get_decay_loss()
         decay_loss += self.output_layer.get_decay_loss()
+        if self.reward_head is not None:
+            decay_loss += self.reward_head.get_decay_loss()
         return decay_loss
 
     def set_elites(self, indexes: List[int]) -> None:
